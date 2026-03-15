@@ -41,7 +41,7 @@ An end-to-end platform for enterprise cloud transformation teams. MigrationOps u
 *Portfolio readiness score, strategy distribution, wave breakdown, and risk summary.*
 
 ### AI Assessment Results
-![Assessment](ai assessment.png)
+![Assessment](screenshots/ai assessment.png)
 *AI-generated migration strategy, target AWS architecture, risk factors, confidence score, and reasoning — with approve/override controls.*
 
 ### Migration Wave Planner
