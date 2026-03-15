@@ -1,0 +1,39 @@
+# MigrationOps — SAM Deployment Configuration
+# https://docs.aws.amazon.com/serverless-application-model/latest/developerguide/samconfig.html
+
+version = 0.1
+
+[default]
+[default.global.parameters]
+stack_name = "migrationops"
+region = "us-east-1"
+
+[default.build.parameters]
+cached = true
+parallel = true
+
+[default.deploy.parameters]
+capabilities = "CAPABILITY_IAM"
+confirm_changeset = true
+resolve_s3 = true
+# s3_prefix is auto-derived from stack_name
+parameter_overrides = [
+  "Environment=prod",
+  "FrontendOrigin=https://d2tzxxbh5vpj3z.cloudfront.net"
+  # AnthropicApiKeyParam defaults to SSM /migrationops/anthropic-api-key
+]
+
+[default.local_start_api.parameters]
+# SAM local API Gateway for Lambda testing
+# Runs on port 3002 to avoid collision with Express dev server (3001)
+port = 3002
+env_vars = "env.local.json"
+warm_containers = "EAGER"
+
+[staging]
+[staging.deploy.parameters]
+stack_name = "migrationops-staging"
+parameter_overrides = [
+  "Environment=staging",
+  "FrontendOrigin=*"
+]

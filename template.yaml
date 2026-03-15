@@ -1,0 +1,416 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  MigrationOps — AI-Assisted Cloud Migration Planning Platform
+
+  Backend infrastructure: API Gateway (HTTP API) + Lambda + DynamoDB
+  Frontend: S3 + CloudFront (deployed separately via deploy-frontend.sh)
+
+# ─── Parameters ───────────────────────────────────────────────────────────────
+
+Parameters:
+  Environment:
+    Type: String
+    Default: prod
+    AllowedValues: [dev, staging, prod]
+    Description: Deployment environment
+
+  AnthropicApiKeyParam:
+    Type: AWS::SSM::Parameter::Value<String>
+    Default: /migrationops/anthropic-api-key
+    Description: >
+      Anthropic API key stored in SSM Parameter Store.
+      Create before deploying:
+        aws ssm put-parameter \
+          --name /migrationops/anthropic-api-key \
+          --value "sk-ant-..." \
+          --type SecureString
+
+  FrontendOrigin:
+    Type: String
+    Default: '*'
+    Description: CloudFront domain for CORS (e.g. https://d1234.cloudfront.net)
+
+# ─── Globals ──────────────────────────────────────────────────────────────────
+
+Globals:
+  Function:
+    Runtime: nodejs20.x
+    Timeout: 60              # 60s for AI calls (assessment + report generation)
+    MemorySize: 512
+    Architectures: [arm64]   # Graviton2 — ~20% cheaper, same performance
+    Environment:
+      Variables:
+        NODE_ENV: production
+        STORAGE_BACKEND: dynamodb
+        AI_PROVIDER: anthropic
+        ANTHROPIC_API_KEY: !Ref AnthropicApiKeyParam
+        ANTHROPIC_MODEL: claude-sonnet-4-20250514
+        DYNAMODB_WORKLOADS_TABLE: !Ref WorkloadsTable
+        DYNAMODB_ASSESSMENTS_TABLE: !Ref AssessmentsTable
+        DYNAMODB_REPORTS_TABLE: !Ref ReportsTable
+        CORS_ORIGIN: !Ref FrontendOrigin
+        AWS_NODEJS_CONNECTION_REUSE_ENABLED: '1'  # Reuse HTTP connections to DynamoDB
+    Tracing: Active          # AWS X-Ray tracing
+
+# ─── Resources ────────────────────────────────────────────────────────────────
+
+Resources:
+
+  # ── API Gateway (HTTP API v2) ───────────────────────────────────────────────
+  # HTTP API is significantly cheaper and lower-latency than REST API v1.
+  # Suitable for straightforward CRUD + AI trigger patterns here.
+
+  MigrationOpsApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      StageName: !Ref Environment
+      CorsConfiguration:
+        AllowOrigins:
+          - !Ref FrontendOrigin
+        AllowMethods:
+          - GET
+          - POST
+          - PUT
+          - PATCH
+          - DELETE
+          - OPTIONS
+        AllowHeaders:
+          - Content-Type
+          - Authorization
+        MaxAge: 300
+      Tags:
+        Project: MigrationOps
+        Environment: !Ref Environment
+
+  # ── DynamoDB Tables ─────────────────────────────────────────────────────────
+
+  WorkloadsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain    # Protect data on stack deletion
+    Properties:
+      TableName: !Sub '${AWS::StackName}-workloads'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: id
+          KeyType: HASH
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      Tags:
+        - Key: Project
+          Value: MigrationOps
+
+  AssessmentsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    Properties:
+      TableName: !Sub '${AWS::StackName}-assessments'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: S
+        - AttributeName: workloadId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: WorkloadIdIndex
+          KeySchema:
+            - AttributeName: workloadId
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL   # Project all attributes — avoids extra GetItem calls
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      Tags:
+        - Key: Project
+          Value: MigrationOps
+
+  ReportsTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    Properties:
+      TableName: !Sub '${AWS::StackName}-reports'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: S
+        - AttributeName: type
+          AttributeType: S
+        - AttributeName: generatedAt
+          AttributeType: S
+      KeySchema:
+        - AttributeName: id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: TypeDateIndex
+          # Fixed partition key 'type=REPORT' + sort by generatedAt
+          # Enables efficient "get latest report" and "list reports sorted by date"
+          KeySchema:
+            - AttributeName: type
+              KeyType: HASH
+            - AttributeName: generatedAt
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      Tags:
+        - Key: Project
+          Value: MigrationOps
+
+  # ── Lambda Functions ─────────────────────────────────────────────────────────
+  # Each function group gets its own Lambda for independent scaling,
+  # separate IAM policies, and faster cold starts (smaller bundle per function).
+
+  WorkloadsFunction:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: false
+        Target: 'es2020'
+        Sourcemap: true
+        EntryPoints:
+          - src/handlers/workloads.ts
+        External:
+          - '@aws-sdk/client-dynamodb'
+          - '@aws-sdk/lib-dynamodb'
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-workloads'
+      CodeUri: backend/
+      Handler: handlers/workloads.handler
+      Description: Workload CRUD — list, get, create, update, delete
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref WorkloadsTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref AssessmentsTable   # Needed for delete (cascades to assessment)
+      Events:
+        ListWorkloads:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref MigrationOpsApi
+            Method: GET
+            Path: /api/workloads
+        GetWorkload:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref MigrationOpsApi
+            Method: GET
+            Path: /api/workloads/{id}
+        CreateWorkload:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref MigrationOpsApi
+            Method: POST
+            Path: /api/workloads
+        UpdateWorkload:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref MigrationOpsApi
+            Method: PUT
+            Path: /api/workloads/{id}
+        DeleteWorkload:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref MigrationOpsApi
+            Method: DELETE
+            Path: /api/workloads/{id}
+
+  AssessmentsFunction:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: false
+        Target: 'es2020'
+        Sourcemap: true
+        EntryPoints:
+          - src/handlers/assessments.ts
+        External:
+          - '@aws-sdk/client-dynamodb'
+          - '@aws-sdk/lib-dynamodb'
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-assessments'
+      CodeUri: backend/
+      Handler: handlers/assessments.handler
+      Description: AI-powered workload assessment + approval workflow
+      Timeout: 120    # Extended for AI calls — Claude can take 15-30s
+      MemorySize: 1024
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref WorkloadsTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref AssessmentsTable
+      Events:
+        ListAssessments:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref MigrationOpsApi
+            Method: GET
+            Path: /api/assessments
+        GetAssessmentForWorkload:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref MigrationOpsApi
+            Method: GET
+            Path: /api/assessments/workload/{workloadId}
+        RunAssessment:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref MigrationOpsApi
+            Method: POST
+            Path: /api/assessments/workload/{workloadId}/run
+        ApproveAssessment:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref MigrationOpsApi
+            Method: PATCH
+            Path: /api/assessments/{id}/approve
+        DeleteAssessment:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref MigrationOpsApi
+            Method: DELETE
+            Path: /api/assessments/{id}
+
+  WavesFunction:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: false
+        Target: 'es2020'
+        Sourcemap: true
+        EntryPoints:
+          - src/handlers/waves.ts
+        External:
+          - '@aws-sdk/client-dynamodb'
+          - '@aws-sdk/lib-dynamodb'
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-waves'
+      CodeUri: backend/
+      Handler: handlers/waves.handler
+      Description: Migration wave planning — workloads grouped by phase
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref WorkloadsTable
+        - DynamoDBReadPolicy:
+            TableName: !Ref AssessmentsTable
+      Events:
+        GetWaves:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref MigrationOpsApi
+            Method: GET
+            Path: /api/waves
+
+  ReportsFunction:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties:
+        Minify: false
+        Target: 'es2020'
+        Sourcemap: true
+        EntryPoints:
+          - src/handlers/reports.ts
+        External:
+          - '@aws-sdk/client-dynamodb'
+          - '@aws-sdk/lib-dynamodb'
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-reports'
+      CodeUri: backend/
+      Handler: handlers/reports.handler
+      Description: Portfolio metrics + AI executive report generation
+      Timeout: 120    # Extended for AI report generation
+      MemorySize: 1024
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref WorkloadsTable
+        - DynamoDBReadPolicy:
+            TableName: !Ref AssessmentsTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ReportsTable
+      Events:
+        GetMetrics:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref MigrationOpsApi
+            Method: GET
+            Path: /api/reports/metrics
+        GetLatestReport:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref MigrationOpsApi
+            Method: GET
+            Path: /api/reports/latest
+        ListReports:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref MigrationOpsApi
+            Method: GET
+            Path: /api/reports
+        GenerateReport:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref MigrationOpsApi
+            Method: POST
+            Path: /api/reports/generate
+
+  # ── CloudWatch Log Groups ────────────────────────────────────────────────────
+  # Explicit log groups with retention prevent indefinite log accumulation
+
+  WorkloadsLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${WorkloadsFunction}'
+      RetentionInDays: 30
+
+  AssessmentsLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${AssessmentsFunction}'
+      RetentionInDays: 30
+
+  WavesLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${WavesFunction}'
+      RetentionInDays: 30
+
+  ReportsLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${ReportsFunction}'
+      RetentionInDays: 30
+
+# ─── Outputs ──────────────────────────────────────────────────────────────────
+
+Outputs:
+  ApiUrl:
+    Description: API Gateway base URL — set as VITE_API_BASE_URL in frontend build
+    Value: !Sub 'https://${MigrationOpsApi}.execute-api.${AWS::Region}.amazonaws.com/${Environment}'
+    Export:
+      Name: !Sub '${AWS::StackName}-ApiUrl'
+
+  WorkloadsTableName:
+    Description: DynamoDB workloads table name
+    Value: !Ref WorkloadsTable
+
+  AssessmentsTableName:
+    Description: DynamoDB assessments table name
+    Value: !Ref AssessmentsTable
+
+  ReportsTableName:
+    Description: DynamoDB reports table name
+    Value: !Ref ReportsTable
+
+  WorkloadsFunctionArn:
+    Description: Workloads Lambda function ARN
+    Value: !GetAtt WorkloadsFunction.Arn

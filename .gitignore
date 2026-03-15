@@ -1,0 +1,46 @@
+# ─── Environment & Secrets ────────────────────────────────────────────────────
+.env
+.env.local
+.env.production
+.env.staging
+.env.*.local
+*.pem
+*.key
+*.p12
+*.pfx
+credentials
+.aws/credentials
+
+# ─── Dependencies ─────────────────────────────────────────────────────────────
+node_modules/
+
+# ─── Build & Dist ─────────────────────────────────────────────────────────────
+dist/
+build/
+frontend/dist/
+backend/dist/
+
+# ─── AWS SAM ──────────────────────────────────────────────────────────────────
+.aws-sam/
+env.local.json
+
+# ─── TypeScript ───────────────────────────────────────────────────────────────
+*.tsbuildinfo
+
+# ─── OS & Editor ──────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# ─── Logs ─────────────────────────────────────────────────────────────────────
+*.log
+npm-debug.log*
+
+# ─── Misc ─────────────────────────────────────────────────────────────────────
+test-event.json
+test-response.json
+cf-dist-config.json
+s3-bucket-policy.json
