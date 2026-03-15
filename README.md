@@ -37,27 +37,31 @@ An end-to-end platform for enterprise cloud transformation teams. MigrationOps u
 > *RetailCo demo — 12 enterprise workloads, fully assessed, wave-planned, and ready to present.*
 
 ### Executive Dashboard
-![Dashboard](docs/screenshots/dashboard.png)
+![Dashboard](dashboard.png)
 *Portfolio readiness score, strategy distribution, wave breakdown, and risk summary.*
 
+### Workload Intake
+![Workload Intake](workload%20intake.png)
+*Structured intake form capturing hosting model, traffic patterns, compliance requirements, and criticality.*
+
 ### AI Assessment Results
-![Assessment](docs/screenshots/ai-assessment.png)
+![Assessment](ai%20assessment.png)
 *AI-generated migration strategy, target AWS architecture, risk factors, confidence score, and reasoning — with approve/override controls.*
 
 ### Migration Wave Planner
-![Wave Planner](docs/screenshots/wave-planner.png)
+![Wave Planner](wave%20planner.png)
 *Three-column wave visualization with AI-sequenced workload assignments and rationale.*
 
 ### Risk Dashboard
-![Risk Dashboard](docs/screenshots/risk-dashboard.png)
-*High-risk workload tracking, dependency flags, compliance analysis, and downtime tolerance heat map.*
+![Risk Dashboard](risk.png)
+*High-risk workload tracking, dependency flags, compliance analysis, and downtime tolerance heatmap.*
 
 ### Architecture Recommendations
-![Architecture](docs/screenshots/architecture.png)
+![Architecture](architecture.png)
 *Per-workload target AWS architecture with service chips and design rationale.*
 
 ### Executive Report
-![Executive Report](docs/screenshots/executive-report.png)
+![Executive Report](exc%20report.png)
 *AI-generated leadership briefing covering portfolio status, strategic recommendations, and migration readiness.*
 
 ---
@@ -307,3 +311,11 @@ POST   /api/reports/generate                 Generate AI executive report
 Enterprise cloud migrations fail at the planning phase — inconsistent strategy selection, poor wave sequencing, and analysis that can't keep pace with a real program. MigrationOps addresses that gap by combining structured migration methodology with AI reasoning in a workflow that stays auditable and keeps humans in control.
 
 The model-agnostic design reflects a real enterprise constraint: governance requirements often dictate which LLM a team can use. Switching from Anthropic to Bedrock is a configuration change, not a rewrite.
+
+---
+
+## Author
+
+**Elijah Burns**
+
+[GitHub](https://github.com/eburns3000) · [Live Demo](https://d2tzxxbh5vpj3z.cloudfront.net)
